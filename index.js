@@ -87,7 +87,13 @@ const db = new sqlite3.Database("HRMdb.db", (err) => {
                 AppliedOn TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (EmployeeID) REFERENCES Employee(EmployeeID)
             )`);
-
+            db.run(`CREATE TABLE IF NOT EXISTS AttendanceRequests (
+                RequestID INTEGER PRIMARY KEY AUTOINCREMENT,
+                EmployeeID INTEGER NOT NULL,
+                Date DATE NOT NULL,
+                Reason TEXT NOT NULL,
+                FOREIGN KEY (EmployeeID) REFERENCES Employee(EmployeeID)
+            )`);
 
         const adminEmail = process.env.ADMIN_EMAIL;
         const adminPassword = process.env.ADMIN_PASSWORD;
@@ -276,16 +282,36 @@ app.post("/login", async (req, res) => {
             if (!isPasswordValid) {
                 return res.status(401).json({ message: "Invalid password" });
             }
+
             const currentTimeandDate = new Date();
             const currentDate = currentTimeandDate.toLocaleDateString();
-
             const currentTime = currentTimeandDate.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+            console.log("currenttime",currentTime)
+            console.log("CURRENTHOURS",currentTimeandDate.getHours())
+            if (["Suspended", "onhold", "resigned"].includes(user.status)) {
+                const token = jwt.sign(
+                    { id: user.EmployeeID, email: user.WorkEmail, issuedAt: currentTime, role: user.Role },
+                    process.env.JWT_SECRET,
+                    { expiresIn: "15m" }
+                );
+
+                return res.status(200).json({
+                    user: {
+                        fullname: user.FullName,
+                        email: user.WorkEmail,
+                        company: user.Company,
+                        logDate: currentDate,
+                        logTime: currentTime,
+                        message: "Login successful",
+                        role: user.Role,
+                        designation: user.designation,
+                        token: token,
+                    },
+                });
+            }
 
             const onTimeStartHours = 14; // Start of workday
-            const lateCutoffHours = 14; // Late cutoff (9:30 AM)
-            const lateCutoffMinutes = 30;
             const endOfDayHours = 18; // End of workday
-            const endOfDayMinutes = 0;
 
             let ArrivalStatus = '';
             let LeaveStatus = "";
@@ -293,7 +319,7 @@ app.post("/login", async (req, res) => {
             let GrossHours = "";
             let Log = "";
 
-            const currentDay = currentTimeandDate.getDay(); // 0 = Sunday, 6 = Saturday
+            const currentDay = currentTimeandDate.getDay();
 
             if (currentDay === 0 || currentDay === 6) {
                 Log = "EL";
@@ -318,24 +344,21 @@ app.post("/login", async (req, res) => {
                 EffectiveHours = "9:00 Hrs";
                 GrossHours = "9:00 Hrs";
                 Log = "No";
-            } else if (
-                currentTimeandDate.getHours() > endOfDayHours ||
-                (currentTimeandDate.getHours() === endOfDayHours &&
-                    currentTimeandDate.getMinutes() > endOfDayMinutes)
-            ) {
-                ArrivalStatus = "-";
-                LeaveStatus = "Yes";
-                EffectiveHours = "0:00 Hrs";
-                GrossHours = "0:00 Hrs";
-                Log = "EL";
-            } else {
+            } else if (currentTimeandDate.getHours() >= onTimeStartHours && currentTimeandDate.getHours() < endOfDayHours) {
                 ArrivalStatus = "-";
                 LeaveStatus = "No";
                 EffectiveHours = "0:00 Hrs";
                 GrossHours = "0:00 Hrs";
                 Log = "WH";
-            } 
-            const insertQuery = `INSERT INTO AttendanceLog(EmployeeID,WorkEmail, LogDate, LogTime, EffectiveHours, GrossHours, ArrivalStatus, LeaveStatus, Logstatus) VALUES (?, ?, ?, ?,?, ?, ?, ?, ?)`;
+            } else {
+                ArrivalStatus = "-";
+                LeaveStatus = "Yes";
+                EffectiveHours = "0:00 Hrs";
+                GrossHours = "0:00 Hrs";
+                Log = "EL";
+            }
+
+            const insertQuery = `INSERT INTO AttendanceLog(EmployeeID, WorkEmail, LogDate, LogTime, EffectiveHours, GrossHours, ArrivalStatus, LeaveStatus, Logstatus) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
             db.run(
                 insertQuery,
                 [
@@ -356,8 +379,11 @@ app.post("/login", async (req, res) => {
                 }
             );
 
-            const token = jwt.sign({id: user.EmployeeID,email: user.WorkEmail,issuedAt: currentTime,role: user.Role,},process.env.JWT_SECRET,{ expiresIn: "1h" });
-
+            const token = jwt.sign(
+                { id: user.EmployeeID, email: user.WorkEmail, issuedAt: currentTime, role: user.Role },
+                process.env.JWT_SECRET,
+                { expiresIn: "1h" }
+            );
 
             return res.status(200).json({
                 user: {
@@ -368,10 +394,8 @@ app.post("/login", async (req, res) => {
                     logTime: currentTime,
                     message: "Login successful",
                     role: user.Role,
-                    desgination: user.designation,
+                    designation: user.designation,
                     token: token,
-
-
                 },
             });
         });
@@ -520,7 +544,7 @@ app.post('/forgotpassword', async (req, res) => {
 
 
 
-//attendance log fetch
+//attendances
 
 app.get('/logs',authorizeRole('Employee'),(req,res) =>{
     const usermail = req.user.email;
@@ -548,6 +572,48 @@ app.get('/request',authorizeRole('Employee'),(req,res) =>{
 
     })
 })
+
+app.post('/request',authorizeRole('Employee'),(req,res) =>{
+    const usermail = req.user.email;
+    const {date,reason} = req.body;
+
+    if(!date || !reason){
+        return res.status(400).json({message:"Date and reason are required"})
+    }
+
+    const query = `INSERT INTO AttendanceRequests(EmployeeID, Date, Reason) VALUES (?, ?, ?)`;
+    db.run(query,[usermail,date,reason],(err) =>{
+        if(err){
+            return res.status(500).json({message:"Error during attendance request"})
+        }
+        res.status(201).json({message:"Attendance request submitted successfully"})
+    })
+})
+
+app.get('/logrequest', authorizeRole(['Admin']), (req, res) => {
+    const attendanceRequestQuery = `SELECT * FROM AttendanceRequests`;
+
+    db.all(attendanceRequestQuery, [], (err, attendanceRequests) => {
+        if (err) {
+            return res.status(500).json({ message: "Error fetching attendance request data" });
+        }
+
+        const employeeIds = attendanceRequests.map(request => request.EmployeeID);
+        const placeholders = employeeIds.map(() => '?').join(',');
+        const attendanceLogQuery = `SELECT GrossHours, ArrivalStatus, LeaveStatus, Logstatus FROM AttendanceLog WHERE EmployeeID IN (${placeholders})`;
+
+        db.all(attendanceLogQuery, employeeIds, (err, attendanceLogs) => {
+            if (err) {
+                return res.status(500).json({ message: "Error fetching attendance log data" });
+            }
+
+            res.status(200).json({
+                attendanceRequests: attendanceRequests,
+                attendanceLogs: attendanceLogs
+            });
+        });
+    });
+});
 
 app.get("/listemployee", authorizeRole(['Admin']), (req, res) => {
     const query = `SELECT EmployeeID, FullName, WorkEmail, Role, designation, phone,status,startdate, Company, Gender, DateOfBirth, Address, City, State, Country, PinCode, About_Yourself FROM Employee`;
@@ -947,6 +1013,16 @@ app.post("/apply",authorizeRole(["Employee"]) , (req, res) => {
     }
 });
 
+// Get all leave requests for admin
+app.get("/empolyee-leave", authorizeRole(["Admin"]), (req, res) => {
+    db.all(`SELECT * FROM LeaveRequests`, [], (err, rows) => {
+        if (err) {
+            console.error("Database error:", err);
+            return res.status(500).json({ message: "Internal server error" });
+        }
+        return res.status(200).json({ data: rows });
+    });
+});
 
 
 // Total no of leaves applied by employee
@@ -992,24 +1068,6 @@ app.delete("/leaves",authorizeRole(["Employee"]) ,(req, res) => {
     });
 });
 
-app.post("/store-email", (req, res) => {
-    const { subject, message, from_name, reply_to } = req.body;
-    console.log(req.body)
-
-    if (!subject || !message || !from_name || !reply_to) {
-        return res.status(400).json({ message: "All fields are required" });
-    }
-
-    const insertQuery = `INSERT INTO Emails (Subject, Message, FromName, ReplyTo) VALUES (?, ?, ?, ?)`;
-    db.run(insertQuery, [subject, message, from_name, reply_to], function (err) {
-        if (err) {
-            console.error("Database insertion error:", err);
-            return res.status(500).json({ message: "Error storing email" });
-        }
-
-        return res.status(201).json({ message: "Email stored successfully", EmailID: this.lastID });
-    });
-});
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
